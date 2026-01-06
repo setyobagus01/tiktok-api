@@ -32,7 +32,10 @@ load_dotenv()
 # ===== Configuration =====
 # TikTok
 MS_TOKEN = os.getenv("MS_TOKEN")
-TIKTOK_BROWSER = os.getenv("TIKTOK_BROWSER", "chromium")
+# Use webkit by default - it's less detectable than chromium
+TIKTOK_BROWSER = os.getenv("TIKTOK_BROWSER", "webkit")
+# Use headless=False by default for production (requires xvfb in Docker)
+TIKTOK_HEADLESS = os.getenv("TIKTOK_HEADLESS", "false").lower() == "true"
 
 # Instagram
 INSTAGRAM_USERNAME = os.getenv("INSTAGRAM_USERNAME")
@@ -366,16 +369,36 @@ async def ensure_tiktok_session():
     
     try:
         tiktok_api = TikTokApi()
-        # Increase timeout to 60 seconds for slow connections
+        
+        # Anti-detection browser arguments
+        browser_args = [
+            "--disable-blink-features=AutomationControlled",
+            "--disable-dev-shm-usage",
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-infobars",
+            "--window-size=1920,1080",
+            "--start-maximized",
+        ]
+        
+        # Context options to appear more like a real browser
+        context_options = {
+            "viewport": {"width": 1920, "height": 1080},
+            "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "locale": "en-US",
+            "timezone_id": "America/New_York",
+        }
+        
+        print(f"🔄 Creating TikTok session with browser={TIKTOK_BROWSER}, headless={TIKTOK_HEADLESS}")
+        
         await tiktok_api.create_sessions(
             ms_tokens=[MS_TOKEN],
             num_sessions=1,
-            sleep_after=3,
+            sleep_after=5,  # Increased sleep for more realistic behavior
             browser=TIKTOK_BROWSER,
-            headless=True,
-            # Playwright context options for longer timeout
-            context_options={"viewport": {"width": 1920, "height": 1080}},
-            override_browser_args=["--disable-blink-features=AutomationControlled"]
+            headless=TIKTOK_HEADLESS,
+            context_options=context_options,
+            override_browser_args=browser_args
         )
         tiktok_session_initialized = True
         tiktok_session_error = None
@@ -393,12 +416,22 @@ async def ensure_tiktok_session():
                 "3. Network issues - check your internet connection\n"
                 f"Original error: {error_msg}"
             )
+        elif "empty response" in error_msg.lower() or "detecting" in error_msg.lower():
+            detail = (
+                "TikTok is detecting bot activity. Solutions:\n"
+                "1. Ensure TIKTOK_HEADLESS=false (requires xvfb in Docker)\n"
+                "2. Try using TIKTOK_BROWSER=webkit instead of chromium\n"
+                "3. Use a residential proxy (set PROXY_URL in .env)\n"
+                "4. Get a fresh MS_TOKEN from your browser cookies\n"
+                f"Original error: {error_msg}"
+            )
         elif "ms_token" in error_msg.lower():
             detail = "Invalid MS_TOKEN. Please get a fresh msToken from TikTok cookies in your browser."
         else:
             detail = f"Failed to create TikTok session: {error_msg}"
         
         raise HTTPException(status_code=503, detail=detail)
+
 
 
 # ===== Instagram Helper Functions =====
