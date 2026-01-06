@@ -79,6 +79,16 @@ Edit `.env` file with your credentials:
 - `PORT`: Server port (default: 8000)
 - `PROXY_URL`: Optional proxy for requests
 
+### API Security 🔒
+- `API_KEY`: Secret key for accessing protected endpoints (required for production)
+
+To generate a secure API key:
+```bash
+python -c "import secrets; print(secrets.token_urlsafe(32))"
+```
+
+> ⚠️ **IMPORTANT**: All API endpoints except `/health` require the `X-API-Key` header. If `API_KEY` is not set, authentication is disabled (development mode only).
+
 ## Usage
 
 ### Start the server:
@@ -136,21 +146,29 @@ python main.py
 
 ## Example Requests
 
+> **Note**: All requests (except `/health`) require the `X-API-Key` header.
+
 ### Get TikTok Video Info
 ```bash
-curl http://localhost:8000/tiktok/video/7123456789012345678
+curl -H "X-API-Key: your_api_key" http://localhost:8000/tiktok/video/7123456789012345678
 ```
 
 ### Get Instagram User Info
 ```bash
-curl http://localhost:8000/instagram/user/instagram
+curl -H "X-API-Key: your_api_key" http://localhost:8000/instagram/user/instagram
 ```
 
 ### Get Instagram Post from URL
 ```bash
 curl -X POST http://localhost:8000/instagram/post/url \
   -H "Content-Type: application/json" \
+  -H "X-API-Key: your_api_key" \
   -d '{"url": "https://www.instagram.com/p/ABC123/"}'
+```
+
+### Health Check (no API key required)
+```bash
+curl http://localhost:8000/health
 ```
 
 ## Docker

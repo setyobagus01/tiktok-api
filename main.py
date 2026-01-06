@@ -11,8 +11,9 @@ from datetime import datetime
 from typing import Optional, List
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Security, Depends
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Field, ConfigDict
 from dotenv import load_dotenv
 
@@ -43,6 +44,9 @@ INSTAGRAM_SESSION_FILE = os.getenv("INSTAGRAM_SESSION_FILE", "instagram_session.
 PROXY_URL = os.getenv("PROXY_URL")
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", 8000))
+
+# API Security
+API_KEY = os.getenv("API_KEY")  # Secret key for API access
 
 # ===== Global State =====
 # TikTok
@@ -705,6 +709,30 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ===== API Key Security =====
+api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+
+async def verify_api_key(api_key: str = Security(api_key_header)):
+    """Verify API key for protected endpoints"""
+    if not API_KEY:
+        # If no API key is configured, allow access (development mode)
+        return True
+    
+    if not api_key:
+        raise HTTPException(
+            status_code=401,
+            detail="Missing API key. Please provide X-API-Key header."
+        )
+    
+    if api_key != API_KEY:
+        raise HTTPException(
+            status_code=403,
+            detail="Invalid API key."
+        )
+    
+    return True
+
 
 # ===== System Endpoints =====
 @app.get("/health", response_model=HealthResponse, tags=["System"])
@@ -725,14 +753,14 @@ async def health_check():
     )
 
 
-@app.post("/tiktok/init", tags=["TikTok - System"])
+@app.post("/tiktok/init", tags=["TikTok - System"], dependencies=[Depends(verify_api_key)])
 async def init_tiktok_session():
     """Initialize TikTok session manually"""
     await ensure_tiktok_session()
     return {"status": "initialized", "message": "TikTok session initialized successfully"}
 
 
-@app.post("/instagram/init", tags=["Instagram - System"])
+@app.post("/instagram/init", tags=["Instagram - System"], dependencies=[Depends(verify_api_key)])
 async def init_instagram_session():
     """Initialize Instagram session manually"""
     ensure_instagram_session()
@@ -740,7 +768,7 @@ async def init_instagram_session():
 
 
 # ===== TikTok Endpoints =====
-@app.get("/tiktok/video/{video_id}", response_model=TikTokVideoResponse, tags=["TikTok - Video"])
+@app.get("/tiktok/video/{video_id}", response_model=TikTokVideoResponse, tags=["TikTok - Video"], dependencies=[Depends(verify_api_key)])
 async def get_tiktok_video_by_id(video_id: str):
     """Get TikTok video information by video ID"""
     await ensure_tiktok_session()
@@ -756,7 +784,7 @@ async def get_tiktok_video_by_id(video_id: str):
         raise HTTPException(status_code=500, detail=f"Error fetching TikTok video: {str(e)}")
 
 
-@app.post("/tiktok/video/url", response_model=TikTokVideoResponse, tags=["TikTok - Video"])
+@app.post("/tiktok/video/url", response_model=TikTokVideoResponse, tags=["TikTok - Video"], dependencies=[Depends(verify_api_key)])
 async def get_tiktok_video_by_url(request: VideoUrlRequest):
     """Get TikTok video information from URL"""
     await ensure_tiktok_session()
@@ -773,7 +801,7 @@ async def get_tiktok_video_by_url(request: VideoUrlRequest):
         raise HTTPException(status_code=500, detail=f"Error fetching TikTok video: {str(e)}")
 
 
-@app.get("/tiktok/video/{video_id}/comments", response_model=TikTokCommentsResponse, tags=["TikTok - Video"])
+@app.get("/tiktok/video/{video_id}/comments", response_model=TikTokCommentsResponse, tags=["TikTok - Video"], dependencies=[Depends(verify_api_key)])
 async def get_tiktok_video_comments(
     video_id: str,
     count: int = Query(default=50, ge=1, le=200, description="Number of comments to fetch")
@@ -801,7 +829,7 @@ async def get_tiktok_video_comments(
         raise HTTPException(status_code=500, detail=f"Error fetching TikTok comments: {str(e)}")
 
 
-@app.get("/tiktok/user/{username}", response_model=TikTokUserResponse, tags=["TikTok - User"])
+@app.get("/tiktok/user/{username}", response_model=TikTokUserResponse, tags=["TikTok - User"], dependencies=[Depends(verify_api_key)])
 async def get_tiktok_user_by_username(username: str):
     """Get TikTok user information by username"""
     await ensure_tiktok_session()
@@ -818,7 +846,7 @@ async def get_tiktok_user_by_username(username: str):
         raise HTTPException(status_code=500, detail=f"Error fetching TikTok user: {str(e)}")
 
 
-@app.get("/tiktok/user/{username}/videos", tags=["TikTok - User"])
+@app.get("/tiktok/user/{username}/videos", tags=["TikTok - User"], dependencies=[Depends(verify_api_key)])
 async def get_tiktok_user_videos(
     username: str,
     count: int = Query(default=10, ge=1, le=50, description="Number of videos to fetch")
@@ -844,7 +872,7 @@ async def get_tiktok_user_videos(
 
 
 # ===== Instagram Endpoints =====
-@app.get("/instagram/user/{username}", response_model=InstagramUserResponse, tags=["Instagram - User"])
+@app.get("/instagram/user/{username}", response_model=InstagramUserResponse, tags=["Instagram - User"], dependencies=[Depends(verify_api_key)])
 async def get_instagram_user_by_username(username: str):
     """Get Instagram user information by username"""
     ensure_instagram_session()
@@ -859,7 +887,7 @@ async def get_instagram_user_by_username(username: str):
         raise HTTPException(status_code=500, detail=f"Error fetching Instagram user: {str(e)}")
 
 
-@app.get("/instagram/user/{username}/posts", tags=["Instagram - User"])
+@app.get("/instagram/user/{username}/posts", tags=["Instagram - User"], dependencies=[Depends(verify_api_key)])
 async def get_instagram_user_posts(
     username: str,
     count: int = Query(default=12, ge=1, le=50, description="Number of posts to fetch")
@@ -905,7 +933,7 @@ async def get_instagram_user_posts(
         raise HTTPException(status_code=500, detail=f"Error fetching Instagram posts: {str(e)}")
 
 
-@app.get("/instagram/user/{username}/stories", tags=["Instagram - User"])
+@app.get("/instagram/user/{username}/stories", tags=["Instagram - User"], dependencies=[Depends(verify_api_key)])
 async def get_instagram_user_stories(username: str):
     """Get stories from an Instagram user"""
     ensure_instagram_session()
@@ -923,7 +951,7 @@ async def get_instagram_user_stories(username: str):
         raise HTTPException(status_code=500, detail=f"Error fetching Instagram stories: {str(e)}")
 
 
-@app.get("/instagram/user/{username}/followers", tags=["Instagram - User"])
+@app.get("/instagram/user/{username}/followers", tags=["Instagram - User"], dependencies=[Depends(verify_api_key)])
 async def get_instagram_user_followers(
     username: str,
     count: int = Query(default=50, ge=1, le=200, description="Number of followers to fetch")
@@ -944,7 +972,7 @@ async def get_instagram_user_followers(
         raise HTTPException(status_code=500, detail=f"Error fetching Instagram followers: {str(e)}")
 
 
-@app.get("/instagram/user/{username}/following", tags=["Instagram - User"])
+@app.get("/instagram/user/{username}/following", tags=["Instagram - User"], dependencies=[Depends(verify_api_key)])
 async def get_instagram_user_following(
     username: str,
     count: int = Query(default=50, ge=1, le=200, description="Number of following to fetch")
@@ -965,7 +993,7 @@ async def get_instagram_user_following(
         raise HTTPException(status_code=500, detail=f"Error fetching Instagram following: {str(e)}")
 
 
-@app.get("/instagram/post/{media_id}", response_model=InstagramMediaResponse, tags=["Instagram - Post"])
+@app.get("/instagram/post/{media_id}", response_model=InstagramMediaResponse, tags=["Instagram - Post"], dependencies=[Depends(verify_api_key)])
 async def get_instagram_post_by_id(media_id: str):
     """Get Instagram post information by media ID or shortcode"""
     ensure_instagram_session()
@@ -993,7 +1021,7 @@ async def get_instagram_post_by_id(media_id: str):
         raise HTTPException(status_code=500, detail=f"Error fetching Instagram post: {str(e)}")
 
 
-@app.post("/instagram/post/url", response_model=InstagramMediaResponse, tags=["Instagram - Post"])
+@app.post("/instagram/post/url", response_model=InstagramMediaResponse, tags=["Instagram - Post"], dependencies=[Depends(verify_api_key)])
 async def get_instagram_post_by_url(request: VideoUrlRequest):
     """Get Instagram post information from URL"""
     ensure_instagram_session()
@@ -1017,7 +1045,7 @@ async def get_instagram_post_by_url(request: VideoUrlRequest):
         raise HTTPException(status_code=500, detail=f"Error fetching Instagram post: {str(e)}")
 
 
-@app.get("/instagram/post/{media_id}/comments", response_model=InstagramCommentsResponse, tags=["Instagram - Post"])
+@app.get("/instagram/post/{media_id}/comments", response_model=InstagramCommentsResponse, tags=["Instagram - Post"], dependencies=[Depends(verify_api_key)])
 async def get_instagram_post_comments(
     media_id: str,
     count: int = Query(default=50, ge=1, le=200, description="Number of comments to fetch")
@@ -1062,7 +1090,7 @@ async def get_instagram_post_comments(
         raise HTTPException(status_code=500, detail=f"Error fetching Instagram comments: {str(e)}")
 
 
-@app.get("/instagram/post/{media_id}/likers", tags=["Instagram - Post"])
+@app.get("/instagram/post/{media_id}/likers", tags=["Instagram - Post"], dependencies=[Depends(verify_api_key)])
 async def get_instagram_post_likers(media_id: str):
     """Get users who liked an Instagram post"""
     ensure_instagram_session()
@@ -1081,7 +1109,7 @@ async def get_instagram_post_likers(media_id: str):
         raise HTTPException(status_code=500, detail=f"Error fetching Instagram likers: {str(e)}")
 
 
-@app.get("/instagram/hashtag/{name}/posts", tags=["Instagram - Hashtag"])
+@app.get("/instagram/hashtag/{name}/posts", tags=["Instagram - Hashtag"], dependencies=[Depends(verify_api_key)])
 async def get_instagram_hashtag_posts(
     name: str,
     count: int = Query(default=20, ge=1, le=50, description="Number of posts to fetch")
@@ -1102,19 +1130,19 @@ async def get_instagram_hashtag_posts(
 
 
 # ===== Backward Compatibility Endpoints (old paths still work) =====
-@app.get("/video/{video_id}", response_model=TikTokVideoResponse, tags=["Legacy"], deprecated=True)
+@app.get("/video/{video_id}", response_model=TikTokVideoResponse, tags=["Legacy"], deprecated=True, dependencies=[Depends(verify_api_key)])
 async def legacy_get_video_by_id(video_id: str):
     """[DEPRECATED] Use /tiktok/video/{video_id} instead"""
     return await get_tiktok_video_by_id(video_id)
 
 
-@app.post("/video/url", response_model=TikTokVideoResponse, tags=["Legacy"], deprecated=True)
+@app.post("/video/url", response_model=TikTokVideoResponse, tags=["Legacy"], deprecated=True, dependencies=[Depends(verify_api_key)])
 async def legacy_get_video_by_url(request: VideoUrlRequest):
     """[DEPRECATED] Use /tiktok/video/url instead"""
     return await get_tiktok_video_by_url(request)
 
 
-@app.get("/user/{username}", response_model=TikTokUserResponse, tags=["Legacy"], deprecated=True)
+@app.get("/user/{username}", response_model=TikTokUserResponse, tags=["Legacy"], deprecated=True, dependencies=[Depends(verify_api_key)])
 async def legacy_get_user_by_username(username: str):
     """[DEPRECATED] Use /tiktok/user/{username} instead"""
     return await get_tiktok_user_by_username(username)
