@@ -1,6 +1,6 @@
 """
-TikTok API Service
-A REST API wrapper for the TikTok-Api library providing video stats, author stats, and publish dates.
+Social Media API Service
+A REST API wrapper for TikTok and Instagram providing video/post stats, author stats, and more.
 """
 
 import os
@@ -8,8 +8,8 @@ import re
 import sys
 import asyncio
 from datetime import datetime
-from typing import Optional
-from contextlib import asynccontextmanager
+from typing import Optional, List
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -17,26 +17,48 @@ from pydantic import BaseModel, Field, ConfigDict
 from dotenv import load_dotenv
 
 from TikTokApi import TikTokApi
+from instagrapi import Client as InstaClient
+from instagrapi.exceptions import (
+    LoginRequired,
+    ChallengeRequired,
+    TwoFactorRequired,
+    PleaseWaitFewMinutes,
+)
 
 # Load environment variables
 load_dotenv()
 
-# Configuration
+# ===== Configuration =====
+# TikTok
 MS_TOKEN = os.getenv("MS_TOKEN")
-PROXY_URL = os.getenv("PROXY_URL")
 TIKTOK_BROWSER = os.getenv("TIKTOK_BROWSER", "chromium")
+
+# Instagram
+INSTAGRAM_USERNAME = os.getenv("INSTAGRAM_USERNAME")
+INSTAGRAM_PASSWORD = os.getenv("INSTAGRAM_PASSWORD")
+INSTAGRAM_SESSION_ID = os.getenv("INSTAGRAM_SESSION_ID")  # Alternative: use session ID from browser cookies
+INSTAGRAM_SESSION_FILE = os.getenv("INSTAGRAM_SESSION_FILE", "instagram_session.json")
+
+# General
+PROXY_URL = os.getenv("PROXY_URL")
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", 8000))
 
-# Global API instance and session state
-api: Optional[TikTokApi] = None
-session_initialized = False
-session_error: Optional[str] = None
+# ===== Global State =====
+# TikTok
+tiktok_api: Optional[TikTokApi] = None
+tiktok_session_initialized = False
+tiktok_session_error: Optional[str] = None
+
+# Instagram
+instagram_client: Optional[InstaClient] = None
+instagram_session_initialized = False
+instagram_session_error: Optional[str] = None
 
 
-# Pydantic Models
-class VideoStats(BaseModel):
-    """Video statistics"""
+# ===== Pydantic Models - TikTok =====
+class TikTokVideoStats(BaseModel):
+    """TikTok Video statistics"""
     model_config = ConfigDict(populate_by_name=True)
     
     views: int = Field(alias="playCount", default=0)
@@ -45,8 +67,8 @@ class VideoStats(BaseModel):
     shares: int = Field(alias="shareCount", default=0)
 
 
-class AuthorInfo(BaseModel):
-    """Author basic information"""
+class TikTokAuthorInfo(BaseModel):
+    """TikTok Author basic information"""
     model_config = ConfigDict(populate_by_name=True)
     
     id: str = ""
@@ -55,8 +77,8 @@ class AuthorInfo(BaseModel):
     avatar: Optional[str] = Field(alias="avatarThumb", default=None)
 
 
-class AuthorStats(BaseModel):
-    """Author statistics"""
+class TikTokAuthorStats(BaseModel):
+    """TikTok Author statistics"""
     model_config = ConfigDict(populate_by_name=True)
     
     followers: int = Field(alias="followerCount", default=0)
@@ -65,68 +87,156 @@ class AuthorStats(BaseModel):
     video_count: int = Field(alias="videoCount", default=0)
 
 
-class VideoResponse(BaseModel):
-    """Full video response"""
+class TikTokVideoResponse(BaseModel):
+    """TikTok Full video response"""
     id: str
     description: str = ""
     create_time: datetime
     create_time_iso: str
-    stats: VideoStats
-    author: AuthorInfo
+    stats: TikTokVideoStats
+    author: TikTokAuthorInfo
 
 
-class UserResponse(BaseModel):
-    """Full user response"""
+class TikTokUserResponse(BaseModel):
+    """TikTok Full user response"""
     id: str
     username: str
     nickname: str
     bio: str = ""
     avatar: Optional[str] = None
-    stats: AuthorStats
+    stats: TikTokAuthorStats
 
 
-class VideoUrlRequest(BaseModel):
-    """Request body for video URL endpoint"""
-    url: str
-
-
-class HealthResponse(BaseModel):
-    """Health check response"""
-    status: str
-    ms_token_configured: bool
-    proxy_configured: bool
-    session_initialized: bool
-    session_error: Optional[str] = None
-
-
-class CommentAuthor(BaseModel):
-    """Comment author info"""
+class TikTokCommentAuthor(BaseModel):
+    """TikTok Comment author info"""
     id: str = ""
     username: str = ""
     nickname: str = ""
     avatar: Optional[str] = None
 
 
-class Comment(BaseModel):
-    """Video comment"""
+class TikTokComment(BaseModel):
+    """TikTok Video comment"""
     id: str = ""
     text: str = ""
     create_time: Optional[datetime] = None
     create_time_iso: str = ""
     likes: int = 0
     reply_count: int = 0
-    author: CommentAuthor
+    author: TikTokCommentAuthor
 
 
-class CommentsResponse(BaseModel):
-    """Comments response"""
+class TikTokCommentsResponse(BaseModel):
+    """TikTok Comments response"""
     video_id: str
     count: int
-    comments: list[Comment]
+    comments: List[TikTokComment]
 
 
-# Helper functions
-def extract_video_id(url: str) -> str:
+# ===== Pydantic Models - Instagram =====
+class InstagramUserStats(BaseModel):
+    """Instagram user statistics"""
+    followers: int = 0
+    following: int = 0
+    posts_count: int = 0
+
+
+class InstagramUserResponse(BaseModel):
+    """Instagram user response"""
+    id: str
+    username: str
+    full_name: str = ""
+    bio: str = ""
+    avatar: Optional[str] = None
+    is_private: bool = False
+    is_verified: bool = False
+    external_url: Optional[str] = None
+    stats: InstagramUserStats
+
+
+class InstagramMediaStats(BaseModel):
+    """Instagram media statistics"""
+    likes: int = 0
+    comments: int = 0
+    views: Optional[int] = None  # For videos/reels
+
+
+class InstagramMediaResponse(BaseModel):
+    """Instagram media/post response"""
+    id: str
+    pk: str
+    code: str  # Shortcode for URL
+    media_type: str  # photo, video, album, reel, igtv
+    caption: str = ""
+    create_time: Optional[datetime] = None
+    create_time_iso: str = ""
+    thumbnail_url: Optional[str] = None
+    video_url: Optional[str] = None
+    stats: InstagramMediaStats
+    author_username: str = ""
+
+
+class InstagramCommentAuthor(BaseModel):
+    """Instagram comment author"""
+    id: str = ""
+    username: str = ""
+    full_name: str = ""
+    avatar: Optional[str] = None
+
+
+class InstagramComment(BaseModel):
+    """Instagram comment"""
+    id: str = ""
+    text: str = ""
+    create_time: Optional[datetime] = None
+    create_time_iso: str = ""
+    likes: int = 0
+    author: InstagramCommentAuthor
+
+
+class InstagramCommentsResponse(BaseModel):
+    """Instagram comments response"""
+    media_id: str
+    count: int
+    comments: List[InstagramComment]
+
+
+class InstagramFollowerResponse(BaseModel):
+    """Instagram follower/following user"""
+    id: str
+    username: str
+    full_name: str = ""
+    avatar: Optional[str] = None
+    is_private: bool = False
+    is_verified: bool = False
+
+
+class InstagramStoryResponse(BaseModel):
+    """Instagram story item"""
+    id: str
+    pk: str
+    media_type: str
+    taken_at: Optional[datetime] = None
+    taken_at_iso: str = ""
+    thumbnail_url: Optional[str] = None
+    video_url: Optional[str] = None
+
+
+# ===== Pydantic Models - General =====
+class VideoUrlRequest(BaseModel):
+    """Request body for video/post URL endpoint"""
+    url: str
+
+
+class HealthResponse(BaseModel):
+    """Health check response"""
+    status: str
+    tiktok: dict
+    instagram: dict
+
+
+# ===== TikTok Helper Functions =====
+def extract_tiktok_video_id(url: str) -> str:
     """Extract video ID from TikTok URL"""
     patterns = [
         r'tiktok\.com/@[\w.-]+/video/(\d+)',
@@ -146,32 +256,30 @@ def extract_video_id(url: str) -> str:
     raise ValueError(f"Could not extract video ID from URL: {url}")
 
 
-def parse_video_data(video_dict: dict) -> VideoResponse:
-    """Parse video dictionary into response model"""
+def parse_tiktok_video_data(video_dict: dict) -> TikTokVideoResponse:
+    """Parse TikTok video dictionary into response model"""
     stats_data = video_dict.get("stats", {})
     author_data = video_dict.get("author", {})
     
-    # Handle createTime which could be string or integer
     create_time_raw = video_dict.get("createTime", 0)
     try:
         create_time_unix = int(create_time_raw) if create_time_raw else 0
         create_time = datetime.fromtimestamp(create_time_unix)
     except (ValueError, TypeError, OSError):
-        # Fallback to current time if parsing fails
         create_time = datetime.now()
     
-    return VideoResponse(
+    return TikTokVideoResponse(
         id=video_dict.get("id", ""),
         description=video_dict.get("desc", ""),
         create_time=create_time,
         create_time_iso=create_time.isoformat(),
-        stats=VideoStats(
+        stats=TikTokVideoStats(
             playCount=stats_data.get("playCount", 0),
             diggCount=stats_data.get("diggCount", 0),
             commentCount=stats_data.get("commentCount", 0),
             shareCount=stats_data.get("shareCount", 0)
         ),
-        author=AuthorInfo(
+        author=TikTokAuthorInfo(
             id=author_data.get("id", ""),
             uniqueId=author_data.get("uniqueId", ""),
             nickname=author_data.get("nickname", ""),
@@ -180,13 +288,8 @@ def parse_video_data(video_dict: dict) -> VideoResponse:
     )
 
 
-
-def parse_user_data(user_dict: dict) -> UserResponse:
-    """Parse user dictionary into response model"""
-    # TikTok-Api may return data in nested structure: userInfo.user and userInfo.stats
-    # Or directly as a user dict
-    
-    # Check if data is nested under 'userInfo'
+def parse_tiktok_user_data(user_dict: dict) -> TikTokUserResponse:
+    """Parse TikTok user dictionary into response model"""
     if "userInfo" in user_dict:
         user_info = user_dict["userInfo"]
         user_data = user_info.get("user", {})
@@ -195,17 +298,16 @@ def parse_user_data(user_dict: dict) -> UserResponse:
         user_data = user_dict["user"]
         stats_data = user_dict.get("stats", {})
     else:
-        # Assume the dict is the user data directly
         user_data = user_dict
         stats_data = user_dict.get("stats", {})
     
-    return UserResponse(
+    return TikTokUserResponse(
         id=str(user_data.get("id", "")),
         username=user_data.get("uniqueId", "") or user_data.get("unique_id", ""),
         nickname=user_data.get("nickname", ""),
         bio=user_data.get("signature", ""),
         avatar=user_data.get("avatarThumb") or user_data.get("avatar_thumb"),
-        stats=AuthorStats(
+        stats=TikTokAuthorStats(
             followerCount=stats_data.get("followerCount", 0) or stats_data.get("follower_count", 0),
             followingCount=stats_data.get("followingCount", 0) or stats_data.get("following_count", 0),
             heartCount=stats_data.get("heartCount", 0) or stats_data.get("heart_count", 0) or stats_data.get("heart", 0),
@@ -214,11 +316,10 @@ def parse_user_data(user_dict: dict) -> UserResponse:
     )
 
 
-def parse_comment(comment_dict: dict) -> Comment:
-    """Parse comment dictionary into Comment model"""
+def parse_tiktok_comment(comment_dict: dict) -> TikTokComment:
+    """Parse TikTok comment dictionary into Comment model"""
     author_data = comment_dict.get("user", {}) or comment_dict.get("author", {})
     
-    # Handle createTime
     create_time_raw = comment_dict.get("createTime", 0) or comment_dict.get("create_time", 0)
     try:
         create_time_unix = int(create_time_raw) if create_time_raw else 0
@@ -226,21 +327,20 @@ def parse_comment(comment_dict: dict) -> Comment:
     except (ValueError, TypeError, OSError):
         create_time = None
     
-    # Handle avatar which can be string or dict with 'uri' key
     avatar_raw = author_data.get("avatarThumb") or author_data.get("avatar_thumb") or author_data.get("avatar")
     if isinstance(avatar_raw, dict):
         avatar = avatar_raw.get("uri") or avatar_raw.get("url") or str(avatar_raw)
     else:
         avatar = avatar_raw if isinstance(avatar_raw, str) else None
     
-    return Comment(
+    return TikTokComment(
         id=str(comment_dict.get("cid", "") or comment_dict.get("id", "")),
         text=comment_dict.get("text", "") or comment_dict.get("comment", ""),
         create_time=create_time,
         create_time_iso=create_time.isoformat() if create_time else "",
         likes=comment_dict.get("diggCount", 0) or comment_dict.get("digg_count", 0) or comment_dict.get("likes", 0),
         reply_count=comment_dict.get("replyCommentTotal", 0) or comment_dict.get("reply_count", 0),
-        author=CommentAuthor(
+        author=TikTokCommentAuthor(
             id=str(author_data.get("id", "") or author_data.get("uid", "")),
             username=author_data.get("uniqueId", "") or author_data.get("unique_id", ""),
             nickname=author_data.get("nickname", ""),
@@ -249,40 +349,351 @@ def parse_comment(comment_dict: dict) -> Comment:
     )
 
 
-
-async def ensure_session():
-    """Ensure TikTok session is initialized (lazy initialization)"""
-    global api, session_initialized, session_error
+async def ensure_tiktok_session():
+    """Ensure TikTok session is initialized"""
+    global tiktok_api, tiktok_session_initialized, tiktok_session_error
     
-    if session_initialized:
+    if tiktok_session_initialized:
         return
     
     if not MS_TOKEN:
-        session_error = "MS_TOKEN not configured"
-        raise HTTPException(status_code=503, detail="MS_TOKEN not configured. Please set it in .env file.")
+        tiktok_session_error = "MS_TOKEN not configured"
+        raise HTTPException(status_code=503, detail="TikTok MS_TOKEN not configured. Please set it in .env file.")
     
     try:
-        api = TikTokApi()
-        await api.create_sessions(
+        tiktok_api = TikTokApi()
+        # Increase timeout to 60 seconds for slow connections
+        await tiktok_api.create_sessions(
             ms_tokens=[MS_TOKEN],
             num_sessions=1,
             sleep_after=3,
             browser=TIKTOK_BROWSER,
-            headless=True
+            headless=True,
+            # Playwright context options for longer timeout
+            context_options={"viewport": {"width": 1920, "height": 1080}},
+            override_browser_args=["--disable-blink-features=AutomationControlled"]
         )
-        session_initialized = True
-        session_error = None
-        print("TikTok API session created successfully")
+        tiktok_session_initialized = True
+        tiktok_session_error = None
+        print("✅ TikTok API session created successfully")
     except Exception as e:
-        session_error = str(e)
-        raise HTTPException(status_code=503, detail=f"Failed to create TikTok session: {str(e)}")
+        error_msg = str(e)
+        tiktok_session_error = error_msg
+        
+        # Provide helpful error messages
+        if "Timeout" in error_msg:
+            detail = (
+                "TikTok connection timed out. Possible causes:\n"
+                "1. Your MS_TOKEN may be expired - get a fresh one from browser cookies\n"
+                "2. TikTok may be blocking your IP - try using a VPN or proxy\n"
+                "3. Network issues - check your internet connection\n"
+                f"Original error: {error_msg}"
+            )
+        elif "ms_token" in error_msg.lower():
+            detail = "Invalid MS_TOKEN. Please get a fresh msToken from TikTok cookies in your browser."
+        else:
+            detail = f"Failed to create TikTok session: {error_msg}"
+        
+        raise HTTPException(status_code=503, detail=detail)
 
 
-# FastAPI Application
+# ===== Instagram Helper Functions =====
+def get_media_type_str(media_type: int, product_type: str = None) -> str:
+    """Convert Instagram media type to string"""
+    if product_type == "clips":
+        return "reel"
+    if product_type == "igtv":
+        return "igtv"
+    
+    media_types = {
+        1: "photo",
+        2: "video",
+        8: "album"
+    }
+    return media_types.get(media_type, "unknown")
+
+
+def parse_instagram_user(user) -> InstagramUserResponse:
+    """Parse instagrapi User object to response model"""
+    return InstagramUserResponse(
+        id=str(user.pk),
+        username=user.username,
+        full_name=user.full_name or "",
+        bio=user.biography or "",
+        avatar=str(user.profile_pic_url) if user.profile_pic_url else None,
+        is_private=user.is_private,
+        is_verified=user.is_verified,
+        external_url=str(user.external_url) if user.external_url else None,
+        stats=InstagramUserStats(
+            followers=user.follower_count or 0,
+            following=user.following_count or 0,
+            posts_count=user.media_count or 0
+        )
+    )
+
+
+def parse_instagram_media(media) -> InstagramMediaResponse:
+    """Parse instagrapi Media object to response model"""
+    taken_at = media.taken_at
+    
+    # For Reels, check play_count in addition to view_count
+    view_count = (
+        getattr(media, 'play_count', None) or 
+        getattr(media, 'ig_play_count', None) or
+        getattr(media, 'video_play_count', None) or
+        getattr(media, 'view_count', None) or
+        getattr(media, 'video_view_count', None)
+    )
+    
+    return InstagramMediaResponse(
+        id=str(media.id),
+        pk=str(media.pk),
+        code=media.code,
+        media_type=get_media_type_str(media.media_type, getattr(media, 'product_type', None)),
+        caption=media.caption_text or "",
+        create_time=taken_at,
+        create_time_iso=taken_at.isoformat() if taken_at else "",
+        thumbnail_url=str(media.thumbnail_url) if media.thumbnail_url else None,
+        video_url=str(media.video_url) if media.video_url else None,
+        stats=InstagramMediaStats(
+            likes=media.like_count or 0,
+            comments=media.comment_count or 0,
+            views=view_count
+        ),
+        author_username=media.user.username if media.user else ""
+    )
+
+
+def parse_instagram_media_dict(data: dict) -> InstagramMediaResponse:
+    """Parse Instagram media from raw dict (for GQL responses)"""
+    from datetime import datetime
+    
+    # Handle different response structures
+    taken_at_raw = data.get('taken_at') or data.get('taken_at_timestamp')
+    if taken_at_raw:
+        try:
+            taken_at = datetime.fromtimestamp(int(taken_at_raw))
+        except:
+            taken_at = None
+    else:
+        taken_at = None
+    
+    # Get media type
+    media_type_raw = data.get('media_type', 1)
+    product_type = data.get('product_type')
+    media_type = get_media_type_str(media_type_raw, product_type)
+    
+    # Get thumbnail
+    thumbnail = None
+    if 'thumbnail_url' in data:
+        thumbnail = data['thumbnail_url']
+    elif 'image_versions2' in data:
+        candidates = data['image_versions2'].get('candidates', [])
+        if candidates:
+            thumbnail = candidates[0].get('url')
+    elif 'display_url' in data:
+        thumbnail = data['display_url']
+    
+    # Get video url
+    video_url = data.get('video_url')
+    if not video_url and 'video_versions' in data:
+        versions = data.get('video_versions', [])
+        if versions:
+            video_url = versions[0].get('url')
+    
+    # Get stats
+    like_count = data.get('like_count', 0) or data.get('edge_media_preview_like', {}).get('count', 0)
+    comment_count = data.get('comment_count', 0) or data.get('edge_media_to_comment', {}).get('count', 0)
+    # For Reels, Instagram uses 'play_count' instead of 'view_count'
+    view_count = (
+        data.get('play_count') or 
+        data.get('ig_play_count') or 
+        data.get('video_play_count') or
+        data.get('view_count') or 
+        data.get('video_view_count') or
+        data.get('fb_play_count') or
+        data.get('clips_metadata', {}).get('play_count') if isinstance(data.get('clips_metadata'), dict) else None
+    )
+    
+    # Get author
+    user = data.get('user', {})
+    author = user.get('username', '') if isinstance(user, dict) else ''
+    
+    return InstagramMediaResponse(
+        id=str(data.get('id', '')),
+        pk=str(data.get('pk', data.get('id', ''))),
+        code=data.get('code', data.get('shortcode', '')),
+        media_type=media_type,
+        caption=data.get('caption', {}).get('text', '') if isinstance(data.get('caption'), dict) else (data.get('caption_text', '') or data.get('caption', '') or ''),
+        create_time=taken_at,
+        create_time_iso=taken_at.isoformat() if taken_at else "",
+        thumbnail_url=thumbnail,
+        video_url=video_url,
+        stats=InstagramMediaStats(
+            likes=like_count,
+            comments=comment_count,
+            views=view_count
+        ),
+        author_username=author
+    )
+
+
+def parse_instagram_comment(comment) -> InstagramComment:
+    """Parse instagrapi Comment object to response model"""
+    created_at = comment.created_at_utc
+    
+    return InstagramComment(
+        id=str(comment.pk),
+        text=comment.text or "",
+        create_time=created_at,
+        create_time_iso=created_at.isoformat() if created_at else "",
+        likes=comment.like_count or 0,
+        author=InstagramCommentAuthor(
+            id=str(comment.user.pk) if comment.user else "",
+            username=comment.user.username if comment.user else "",
+            full_name=comment.user.full_name if comment.user else "",
+            avatar=str(comment.user.profile_pic_url) if comment.user and comment.user.profile_pic_url else None
+        )
+    )
+
+
+def parse_instagram_comment_dict(data: dict) -> InstagramComment:
+    """Parse Instagram comment from raw dict"""
+    from datetime import datetime
+    
+    # Handle created_at timestamp
+    created_at_raw = data.get('created_at') or data.get('created_at_utc')
+    if created_at_raw:
+        try:
+            created_at = datetime.fromtimestamp(int(created_at_raw))
+        except:
+            created_at = None
+    else:
+        created_at = None
+    
+    # Get user info
+    user = data.get('user', {})
+    
+    return InstagramComment(
+        id=str(data.get('pk', data.get('id', ''))),
+        text=data.get('text', ''),
+        create_time=created_at,
+        create_time_iso=created_at.isoformat() if created_at else "",
+        likes=data.get('comment_like_count', 0) or data.get('like_count', 0),
+        author=InstagramCommentAuthor(
+            id=str(user.get('pk', user.get('id', ''))),
+            username=user.get('username', ''),
+            full_name=user.get('full_name', ''),
+            avatar=user.get('profile_pic_url')
+        )
+    )
+
+
+def parse_instagram_follower(user) -> InstagramFollowerResponse:
+    """Parse instagrapi UserShort object to follower response"""
+    return InstagramFollowerResponse(
+        id=str(user.pk),
+        username=user.username,
+        full_name=user.full_name or "",
+        avatar=str(user.profile_pic_url) if user.profile_pic_url else None,
+        is_private=getattr(user, 'is_private', False),
+        is_verified=getattr(user, 'is_verified', False)
+    )
+
+
+def parse_instagram_story(story) -> InstagramStoryResponse:
+    """Parse instagrapi Story object to response model"""
+    taken_at = story.taken_at
+    
+    return InstagramStoryResponse(
+        id=str(story.id),
+        pk=str(story.pk),
+        media_type=get_media_type_str(story.media_type),
+        taken_at=taken_at,
+        taken_at_iso=taken_at.isoformat() if taken_at else "",
+        thumbnail_url=str(story.thumbnail_url) if story.thumbnail_url else None,
+        video_url=str(story.video_url) if story.video_url else None
+    )
+
+
+def ensure_instagram_session():
+    """Ensure Instagram session is initialized"""
+    global instagram_client, instagram_session_initialized, instagram_session_error
+    
+    if instagram_session_initialized:
+        return
+    
+    # Check if we have any credentials
+    has_session_id = bool(INSTAGRAM_SESSION_ID)
+    has_user_pass = bool(INSTAGRAM_USERNAME and INSTAGRAM_PASSWORD)
+    
+    if not has_session_id and not has_user_pass:
+        instagram_session_error = "Instagram credentials not configured"
+        raise HTTPException(
+            status_code=503, 
+            detail="Instagram credentials not configured. Please set INSTAGRAM_SESSION_ID or (INSTAGRAM_USERNAME and INSTAGRAM_PASSWORD) in .env file."
+        )
+    
+    try:
+        instagram_client = InstaClient()
+        session_path = Path(INSTAGRAM_SESSION_FILE)
+        
+        # Priority 1: Use session ID if provided (most reliable)
+        if has_session_id:
+            try:
+                instagram_client.login_by_sessionid(INSTAGRAM_SESSION_ID)
+                instagram_client.dump_settings(session_path)
+                instagram_session_initialized = True
+                instagram_session_error = None
+                print("✅ Instagram login successful via session ID")
+                return
+            except Exception as e:
+                print(f"⚠️ Session ID login failed: {e}, trying other methods...")
+        
+        # Priority 2: Try to load existing session file
+        if session_path.exists():
+            try:
+                instagram_client.load_settings(session_path)
+                # Validate session by getting own user info
+                instagram_client.get_timeline_feed()
+                instagram_session_initialized = True
+                instagram_session_error = None
+                print("✅ Instagram session loaded from file")
+                return
+            except Exception:
+                print("⚠️ Saved session expired, trying fresh login...")
+                instagram_client = InstaClient()
+        
+        # Priority 3: Username/password login
+        if has_user_pass:
+            instagram_client.login(INSTAGRAM_USERNAME, INSTAGRAM_PASSWORD)
+            instagram_client.dump_settings(session_path)
+            instagram_session_initialized = True
+            instagram_session_error = None
+            print("✅ Instagram login successful, session saved")
+            return
+        
+        raise Exception("No valid login method available")
+        
+    except TwoFactorRequired:
+        instagram_session_error = "Two-factor authentication required"
+        raise HTTPException(status_code=503, detail="Instagram 2FA required. Please disable 2FA or use session ID login.")
+    except ChallengeRequired:
+        instagram_session_error = "Challenge required (suspicious login detected)"
+        raise HTTPException(status_code=503, detail="Instagram challenge required. Please use session ID login instead.")
+    except PleaseWaitFewMinutes:
+        instagram_session_error = "Rate limited - please wait"
+        raise HTTPException(status_code=429, detail="Instagram rate limited. Please wait a few minutes.")
+    except Exception as e:
+        instagram_session_error = str(e)
+        raise HTTPException(status_code=503, detail=f"Failed to login to Instagram: {str(e)}")
+
+
+# ===== FastAPI Application =====
 app = FastAPI(
-    title="TikTok API Service",
-    description="REST API for fetching TikTok video stats, author stats, and publish dates",
-    version="1.0.0"
+    title="Social Media API Service",
+    description="REST API for fetching TikTok and Instagram stats, posts, comments, and more",
+    version="2.0.0"
 )
 
 # CORS middleware
@@ -295,99 +706,91 @@ app.add_middleware(
 )
 
 
+# ===== System Endpoints =====
 @app.get("/health", response_model=HealthResponse, tags=["System"])
 async def health_check():
-    """Health check endpoint"""
+    """Health check endpoint for both platforms"""
     return HealthResponse(
         status="healthy",
-        ms_token_configured=bool(MS_TOKEN),
-        proxy_configured=bool(PROXY_URL),
-        session_initialized=session_initialized,
-        session_error=session_error
+        tiktok={
+            "ms_token_configured": bool(MS_TOKEN),
+            "session_initialized": tiktok_session_initialized,
+            "session_error": tiktok_session_error
+        },
+        instagram={
+            "credentials_configured": bool(INSTAGRAM_USERNAME and INSTAGRAM_PASSWORD),
+            "session_initialized": instagram_session_initialized,
+            "session_error": instagram_session_error
+        }
     )
 
 
-@app.post("/init", tags=["System"])
-async def init_session():
-    """
-    Initialize TikTok session manually.
-    
-    Call this endpoint to pre-initialize the TikTok session before making requests.
-    If not called, the session will be initialized on the first request.
-    """
-    await ensure_session()
+@app.post("/tiktok/init", tags=["TikTok - System"])
+async def init_tiktok_session():
+    """Initialize TikTok session manually"""
+    await ensure_tiktok_session()
     return {"status": "initialized", "message": "TikTok session initialized successfully"}
 
 
-@app.get("/video/{video_id}", response_model=VideoResponse, tags=["Video"])
-async def get_video_by_id(video_id: str):
-    """
-    Get video information by video ID.
-    
-    Returns video stats (views, likes, comments, shares), publish date, and author info.
-    """
-    await ensure_session()
+@app.post("/instagram/init", tags=["Instagram - System"])
+async def init_instagram_session():
+    """Initialize Instagram session manually"""
+    ensure_instagram_session()
+    return {"status": "initialized", "message": "Instagram session initialized successfully"}
+
+
+# ===== TikTok Endpoints =====
+@app.get("/tiktok/video/{video_id}", response_model=TikTokVideoResponse, tags=["TikTok - Video"])
+async def get_tiktok_video_by_id(video_id: str):
+    """Get TikTok video information by video ID"""
+    await ensure_tiktok_session()
     
     try:
-        # Construct URL from video ID for the TikTok-Api
         video_url = f"https://www.tiktok.com/@user/video/{video_id}"
-        video = api.video(url=video_url)
+        video = tiktok_api.video(url=video_url)
         video_data = await video.info()
-        return parse_video_data(video_data)
+        return parse_tiktok_video_data(video_data)
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error fetching video: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error fetching TikTok video: {str(e)}")
 
 
-@app.post("/video/url", response_model=VideoResponse, tags=["Video"])
-async def get_video_by_url(request: VideoUrlRequest):
-    """
-    Get video information from a TikTok URL.
-    
-    Accepts various TikTok URL formats:
-    - https://www.tiktok.com/@username/video/1234567890
-    - https://vm.tiktok.com/abcdef
-    - https://tiktok.com/t/abcdef
-    """
-    await ensure_session()
+@app.post("/tiktok/video/url", response_model=TikTokVideoResponse, tags=["TikTok - Video"])
+async def get_tiktok_video_by_url(request: VideoUrlRequest):
+    """Get TikTok video information from URL"""
+    await ensure_tiktok_session()
     
     try:
-        # Use the URL directly with TikTok-Api
-        video = api.video(url=request.url)
+        video = tiktok_api.video(url=request.url)
         video_data = await video.info()
-        return parse_video_data(video_data)
+        return parse_tiktok_video_data(video_data)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error fetching video: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error fetching TikTok video: {str(e)}")
 
 
-@app.get("/video/{video_id}/comments", response_model=CommentsResponse, tags=["Video"])
-async def get_video_comments(
+@app.get("/tiktok/video/{video_id}/comments", response_model=TikTokCommentsResponse, tags=["TikTok - Video"])
+async def get_tiktok_video_comments(
     video_id: str,
     count: int = Query(default=50, ge=1, le=200, description="Number of comments to fetch")
 ):
-    """
-    Get comments from a TikTok video.
-    
-    Returns comments with author info, like count, and reply count.
-    """
-    await ensure_session()
+    """Get comments from a TikTok video"""
+    await ensure_tiktok_session()
     
     try:
-        # Construct URL from video ID
         video_url = f"https://www.tiktok.com/@user/video/{video_id}"
-        video = api.video(url=video_url)
+        video = tiktok_api.video(url=video_url)
         
         comments = []
         async for comment in video.comments(count=count):
             comment_data = comment.as_dict if hasattr(comment, 'as_dict') else comment
-            comments.append(parse_comment(comment_data))
+            comments.append(parse_tiktok_comment(comment_data))
         
-        return CommentsResponse(
+        return TikTokCommentsResponse(
             video_id=video_id,
             count=len(comments),
             comments=comments
@@ -395,66 +798,333 @@ async def get_video_comments(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error fetching comments: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error fetching TikTok comments: {str(e)}")
 
 
-@app.get("/user/{username}", response_model=UserResponse, tags=["User"])
-async def get_user_by_username(username: str):
-    """
-    Get user/author information by username.
-    
-    Returns author stats (followers, following, total likes, video count).
-    """
-    await ensure_session()
+@app.get("/tiktok/user/{username}", response_model=TikTokUserResponse, tags=["TikTok - User"])
+async def get_tiktok_user_by_username(username: str):
+    """Get TikTok user information by username"""
+    await ensure_tiktok_session()
     
     username = username.lstrip("@")
     
     try:
-        user = api.user(username=username)
+        user = tiktok_api.user(username=username)
         user_data = await user.info()
-        return parse_user_data(user_data)
+        return parse_tiktok_user_data(user_data)
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error fetching user: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error fetching TikTok user: {str(e)}")
 
 
-@app.get("/user/{username}/videos", tags=["User"])
-async def get_user_videos(
+@app.get("/tiktok/user/{username}/videos", tags=["TikTok - User"])
+async def get_tiktok_user_videos(
     username: str,
     count: int = Query(default=10, ge=1, le=50, description="Number of videos to fetch")
 ):
-    """
-    Get recent videos from a user.
-    
-    Returns a list of videos with their stats and publish dates.
-    """
-    await ensure_session()
+    """Get recent videos from a TikTok user"""
+    await ensure_tiktok_session()
     
     username = username.lstrip("@")
     
     try:
-        user = api.user(username=username)
+        user = tiktok_api.user(username=username)
         videos = []
         
         async for video in user.videos(count=count):
             video_data = video.as_dict
-            videos.append(parse_video_data(video_data))
+            videos.append(parse_tiktok_video_data(video_data))
         
         return {"username": username, "count": len(videos), "videos": videos}
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error fetching user videos: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error fetching TikTok user videos: {str(e)}")
 
 
-# Run with uvicorn when executed directly
+# ===== Instagram Endpoints =====
+@app.get("/instagram/user/{username}", response_model=InstagramUserResponse, tags=["Instagram - User"])
+async def get_instagram_user_by_username(username: str):
+    """Get Instagram user information by username"""
+    ensure_instagram_session()
+    
+    username = username.lstrip("@")
+    
+    try:
+        user_id = instagram_client.user_id_from_username(username)
+        user = instagram_client.user_info(user_id)
+        return parse_instagram_user(user)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching Instagram user: {str(e)}")
+
+
+@app.get("/instagram/user/{username}/posts", tags=["Instagram - User"])
+async def get_instagram_user_posts(
+    username: str,
+    count: int = Query(default=12, ge=1, le=50, description="Number of posts to fetch")
+):
+    """Get recent posts from an Instagram user"""
+    ensure_instagram_session()
+    
+    username = username.lstrip("@")
+    
+    try:
+        user_id = instagram_client.user_id_from_username(username)
+        posts = []
+        
+        # Try GQL method first (more reliable)
+        try:
+            medias = instagram_client.user_medias_gql(user_id, count)
+            for media in medias:
+                try:
+                    posts.append(parse_instagram_media(media))
+                except Exception:
+                    # If parsing fails, try raw dict
+                    if hasattr(media, '__dict__'):
+                        posts.append(parse_instagram_media_dict(media.__dict__))
+        except Exception as gql_error:
+            print(f"GQL method failed: {gql_error}, trying V1 API...")
+            # Fallback to V1 API with raw request
+            try:
+                response = instagram_client.private_request(
+                    f"feed/user/{user_id}/",
+                    params={"count": count}
+                )
+                items = response.get('items', [])
+                for item in items:
+                    try:
+                        posts.append(parse_instagram_media_dict(item))
+                    except Exception as parse_error:
+                        print(f"Failed to parse media: {parse_error}")
+            except Exception as v1_error:
+                print(f"V1 API also failed: {v1_error}")
+        
+        return {"username": username, "count": len(posts), "posts": posts}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching Instagram posts: {str(e)}")
+
+
+@app.get("/instagram/user/{username}/stories", tags=["Instagram - User"])
+async def get_instagram_user_stories(username: str):
+    """Get stories from an Instagram user"""
+    ensure_instagram_session()
+    
+    username = username.lstrip("@")
+    
+    try:
+        user_id = instagram_client.user_id_from_username(username)
+        stories = instagram_client.user_stories(user_id)
+        
+        story_list = [parse_instagram_story(story) for story in stories]
+        
+        return {"username": username, "count": len(story_list), "stories": story_list}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching Instagram stories: {str(e)}")
+
+
+@app.get("/instagram/user/{username}/followers", tags=["Instagram - User"])
+async def get_instagram_user_followers(
+    username: str,
+    count: int = Query(default=50, ge=1, le=200, description="Number of followers to fetch")
+):
+    """Get followers of an Instagram user"""
+    ensure_instagram_session()
+    
+    username = username.lstrip("@")
+    
+    try:
+        user_id = instagram_client.user_id_from_username(username)
+        followers = instagram_client.user_followers(user_id, amount=count)
+        
+        follower_list = [parse_instagram_follower(user) for user in followers.values()]
+        
+        return {"username": username, "count": len(follower_list), "followers": follower_list}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching Instagram followers: {str(e)}")
+
+
+@app.get("/instagram/user/{username}/following", tags=["Instagram - User"])
+async def get_instagram_user_following(
+    username: str,
+    count: int = Query(default=50, ge=1, le=200, description="Number of following to fetch")
+):
+    """Get users followed by an Instagram user"""
+    ensure_instagram_session()
+    
+    username = username.lstrip("@")
+    
+    try:
+        user_id = instagram_client.user_id_from_username(username)
+        following = instagram_client.user_following(user_id, amount=count)
+        
+        following_list = [parse_instagram_follower(user) for user in following.values()]
+        
+        return {"username": username, "count": len(following_list), "following": following_list}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching Instagram following: {str(e)}")
+
+
+@app.get("/instagram/post/{media_id}", response_model=InstagramMediaResponse, tags=["Instagram - Post"])
+async def get_instagram_post_by_id(media_id: str):
+    """Get Instagram post information by media ID or shortcode"""
+    ensure_instagram_session()
+    
+    try:
+        # Check if it's a shortcode (letters) or media PK (numbers)
+        if media_id.isdigit():
+            pk = media_id
+        else:
+            pk = instagram_client.media_pk_from_code(media_id)
+        
+        # Try standard method first
+        try:
+            media = instagram_client.media_info(pk)
+            return parse_instagram_media(media)
+        except Exception as e:
+            print(f"Standard media_info failed: {e}, trying raw API...")
+            # Fallback to raw API request
+            response = instagram_client.private_request(f"media/{pk}/info/")
+            items = response.get('items', [])
+            if items:
+                return parse_instagram_media_dict(items[0])
+            raise Exception("No media found")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching Instagram post: {str(e)}")
+
+
+@app.post("/instagram/post/url", response_model=InstagramMediaResponse, tags=["Instagram - Post"])
+async def get_instagram_post_by_url(request: VideoUrlRequest):
+    """Get Instagram post information from URL"""
+    ensure_instagram_session()
+    
+    try:
+        pk = instagram_client.media_pk_from_url(request.url)
+        
+        # Try standard method first
+        try:
+            media = instagram_client.media_info(pk)
+            return parse_instagram_media(media)
+        except Exception as e:
+            print(f"Standard media_info failed: {e}, trying raw API...")
+            # Fallback to raw API request
+            response = instagram_client.private_request(f"media/{pk}/info/")
+            items = response.get('items', [])
+            if items:
+                return parse_instagram_media_dict(items[0])
+            raise Exception("No media found")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching Instagram post: {str(e)}")
+
+
+@app.get("/instagram/post/{media_id}/comments", response_model=InstagramCommentsResponse, tags=["Instagram - Post"])
+async def get_instagram_post_comments(
+    media_id: str,
+    count: int = Query(default=50, ge=1, le=200, description="Number of comments to fetch")
+):
+    """Get comments from an Instagram post"""
+    ensure_instagram_session()
+    
+    try:
+        # Check if it's a shortcode or media PK
+        if not media_id.isdigit():
+            media_id = str(instagram_client.media_pk_from_code(media_id))
+        
+        comment_list = []
+        
+        # Try standard method first
+        try:
+            comments = instagram_client.media_comments(media_id, amount=count)
+            comment_list = [parse_instagram_comment(comment) for comment in comments]
+        except Exception as e:
+            print(f"Standard media_comments failed: {e}, trying raw API...")
+            # Fallback to raw API request
+            try:
+                response = instagram_client.private_request(
+                    f"media/{media_id}/comments/",
+                    params={"count": count}
+                )
+                raw_comments = response.get('comments', [])
+                for raw_comment in raw_comments:
+                    try:
+                        comment_list.append(parse_instagram_comment_dict(raw_comment))
+                    except Exception as parse_error:
+                        print(f"Failed to parse comment: {parse_error}")
+            except Exception as api_error:
+                print(f"Raw API also failed: {api_error}")
+        
+        return InstagramCommentsResponse(
+            media_id=str(media_id),
+            count=len(comment_list),
+            comments=comment_list
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching Instagram comments: {str(e)}")
+
+
+@app.get("/instagram/post/{media_id}/likers", tags=["Instagram - Post"])
+async def get_instagram_post_likers(media_id: str):
+    """Get users who liked an Instagram post"""
+    ensure_instagram_session()
+    
+    try:
+        # Check if it's a shortcode or media PK
+        if not media_id.isdigit():
+            media_id = instagram_client.media_pk_from_code(media_id)
+        
+        likers = instagram_client.media_likers(media_id)
+        
+        liker_list = [parse_instagram_follower(user) for user in likers]
+        
+        return {"media_id": str(media_id), "count": len(liker_list), "likers": liker_list}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching Instagram likers: {str(e)}")
+
+
+@app.get("/instagram/hashtag/{name}/posts", tags=["Instagram - Hashtag"])
+async def get_instagram_hashtag_posts(
+    name: str,
+    count: int = Query(default=20, ge=1, le=50, description="Number of posts to fetch")
+):
+    """Get top posts for a hashtag"""
+    ensure_instagram_session()
+    
+    name = name.lstrip("#")
+    
+    try:
+        medias = instagram_client.hashtag_medias_top(name, amount=count)
+        
+        posts = [parse_instagram_media(media) for media in medias]
+        
+        return {"hashtag": name, "count": len(posts), "posts": posts}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching Instagram hashtag posts: {str(e)}")
+
+
+# ===== Backward Compatibility Endpoints (old paths still work) =====
+@app.get("/video/{video_id}", response_model=TikTokVideoResponse, tags=["Legacy"], deprecated=True)
+async def legacy_get_video_by_id(video_id: str):
+    """[DEPRECATED] Use /tiktok/video/{video_id} instead"""
+    return await get_tiktok_video_by_id(video_id)
+
+
+@app.post("/video/url", response_model=TikTokVideoResponse, tags=["Legacy"], deprecated=True)
+async def legacy_get_video_by_url(request: VideoUrlRequest):
+    """[DEPRECATED] Use /tiktok/video/url instead"""
+    return await get_tiktok_video_by_url(request)
+
+
+@app.get("/user/{username}", response_model=TikTokUserResponse, tags=["Legacy"], deprecated=True)
+async def legacy_get_user_by_username(username: str):
+    """[DEPRECATED] Use /tiktok/user/{username} instead"""
+    return await get_tiktok_user_by_username(username)
+
+
+# ===== Run Server =====
 if __name__ == "__main__":
     import uvicorn
     
-    # For Windows, we need to use a workaround for subprocess in asyncio
     if sys.platform == "win32":
-        # Use --reload without the proactor event loop issue
         uvicorn.run("main:app", host=HOST, port=PORT, reload=False)
     else:
         uvicorn.run("main:app", host=HOST, port=PORT, reload=True)
