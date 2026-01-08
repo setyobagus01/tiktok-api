@@ -7,6 +7,8 @@ import os
 import re
 import sys
 import asyncio
+import random
+import time
 from datetime import datetime
 from typing import Optional, List
 from pathlib import Path
@@ -47,6 +49,15 @@ PORT = int(os.getenv("PORT", 8000))
 
 # API Security
 API_KEY = os.getenv("API_KEY")  # Secret key for API access
+
+# Anti-detection settings
+MIN_REQUEST_DELAY = float(os.getenv("MIN_REQUEST_DELAY", "1.0"))  # Minimum seconds between requests
+MAX_REQUEST_DELAY = float(os.getenv("MAX_REQUEST_DELAY", "3.0"))  # Maximum seconds between requests
+ENABLE_ANTI_DETECTION = os.getenv("ENABLE_ANTI_DETECTION", "true").lower() == "true"
+
+# Track last request time for rate limiting
+last_tiktok_request_time = 0
+last_instagram_request_time = 0
 
 # ===== Global State =====
 # TikTok
@@ -199,10 +210,12 @@ class InstagramComment(BaseModel):
 
 
 class InstagramCommentsResponse(BaseModel):
-    """Instagram comments response"""
+    """Instagram comments response with pagination"""
     media_id: str
     count: int
     comments: List[InstagramComment]
+    next_cursor: Optional[str] = None
+    has_more: bool = False
 
 
 class InstagramFollowerResponse(BaseModel):
@@ -353,8 +366,141 @@ def parse_tiktok_comment(comment_dict: dict) -> TikTokComment:
     )
 
 
+# ===== Anti-Detection Helper Functions =====
+# Realistic user agents for different platforms
+USER_AGENTS = [
+    # Chrome on Windows
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+    # Chrome on Mac
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    # Firefox on Windows
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0",
+    # Safari on Mac
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15",
+]
+
+# Realistic viewport sizes
+VIEWPORT_SIZES = [
+    {"width": 1920, "height": 1080},
+    {"width": 1536, "height": 864},
+    {"width": 1440, "height": 900},
+    {"width": 1366, "height": 768},
+    {"width": 2560, "height": 1440},
+]
+
+# Instagram device settings for mobile API
+INSTAGRAM_DEVICES = [
+    {
+        "app_version": "269.0.0.18.75",
+        "android_version": 31,
+        "android_release": "12.0",
+        "dpi": "480dpi",
+        "resolution": "1080x2400",
+        "manufacturer": "Samsung",
+        "device": "SM-G991B",
+        "model": "Galaxy S21",
+        "cpu": "exynos2100",
+        "version_code": "314665256",
+    },
+    {
+        "app_version": "269.0.0.18.75",
+        "android_version": 33,
+        "android_release": "13.0",
+        "dpi": "420dpi",
+        "resolution": "1080x2340",
+        "manufacturer": "Google",
+        "device": "Pixel 7",
+        "model": "Pixel 7",
+        "cpu": "tensor",
+        "version_code": "314665256",
+    },
+    {
+        "app_version": "269.0.0.18.75",
+        "android_version": 32,
+        "android_release": "12.1",
+        "dpi": "440dpi",
+        "resolution": "1440x3200",
+        "manufacturer": "Samsung",
+        "device": "SM-S908B",
+        "model": "Galaxy S22 Ultra",
+        "cpu": "exynos2200",
+        "version_code": "314665256",
+    },
+]
+
+
+def get_random_user_agent() -> str:
+    """Get a random realistic user agent"""
+    return random.choice(USER_AGENTS)
+
+
+def get_random_viewport() -> dict:
+    """Get a random realistic viewport size"""
+    return random.choice(VIEWPORT_SIZES)
+
+
+def get_random_device() -> dict:
+    """Get a random Instagram device configuration"""
+    return random.choice(INSTAGRAM_DEVICES)
+
+
+async def apply_request_delay(platform: str = "tiktok"):
+    """Apply a random delay between requests to avoid rate limiting"""
+    global last_tiktok_request_time, last_instagram_request_time
+    
+    if not ENABLE_ANTI_DETECTION:
+        return
+    
+    current_time = time.time()
+    last_request_time = last_tiktok_request_time if platform == "tiktok" else last_instagram_request_time
+    
+    # Calculate time since last request
+    time_since_last = current_time - last_request_time
+    
+    # Apply delay if needed
+    min_delay = MIN_REQUEST_DELAY
+    max_delay = MAX_REQUEST_DELAY
+    
+    if time_since_last < min_delay:
+        # Add random delay
+        delay = random.uniform(min_delay, max_delay)
+        await asyncio.sleep(delay)
+    
+    # Update last request time
+    if platform == "tiktok":
+        last_tiktok_request_time = time.time()
+    else:
+        last_instagram_request_time = time.time()
+
+
+def apply_request_delay_sync(platform: str = "instagram"):
+    """Synchronous version of request delay for Instagram"""
+    global last_tiktok_request_time, last_instagram_request_time
+    
+    if not ENABLE_ANTI_DETECTION:
+        return
+    
+    current_time = time.time()
+    last_request_time = last_instagram_request_time if platform == "instagram" else last_tiktok_request_time
+    
+    # Calculate time since last request
+    time_since_last = current_time - last_request_time
+    
+    # Apply delay if needed
+    if time_since_last < MIN_REQUEST_DELAY:
+        delay = random.uniform(MIN_REQUEST_DELAY, MAX_REQUEST_DELAY)
+        time.sleep(delay)
+    
+    # Update last request time
+    if platform == "instagram":
+        last_instagram_request_time = time.time()
+    else:
+        last_tiktok_request_time = time.time()
+
+
 async def ensure_tiktok_session():
-    """Ensure TikTok session is initialized"""
+    """Ensure TikTok session is initialized with anti-detection measures"""
     global tiktok_api, tiktok_session_initialized, tiktok_session_error
     
     if tiktok_session_initialized:
@@ -366,20 +512,53 @@ async def ensure_tiktok_session():
     
     try:
         tiktok_api = TikTokApi()
-        # Increase timeout to 60 seconds for slow connections
+        
+        # Get random viewport for fingerprint variation
+        viewport = get_random_viewport() if ENABLE_ANTI_DETECTION else {"width": 1920, "height": 1080}
+        
+        # Stealth browser arguments to avoid detection
+        stealth_args = [
+            "--disable-blink-features=AutomationControlled",
+            "--disable-dev-shm-usage",
+            "--disable-infobars",
+            "--disable-background-networking",
+            "--disable-breakpad",
+            "--disable-component-update",
+            "--disable-default-apps",
+            "--disable-extensions",
+            "--disable-hang-monitor",
+            "--disable-popup-blocking",
+            "--disable-prompt-on-repost",
+            "--disable-sync",
+            "--disable-translate",
+            "--metrics-recording-only",
+            "--no-first-run",
+            "--safebrowsing-disable-auto-update",
+            "--password-store=basic",
+            "--use-mock-keychain",
+        ]
+        
+        # Random sleep before creating session (1-3 seconds)
+        if ENABLE_ANTI_DETECTION:
+            await asyncio.sleep(random.uniform(1, 3))
+        
         await tiktok_api.create_sessions(
             ms_tokens=[MS_TOKEN],
             num_sessions=1,
-            sleep_after=3,
+            sleep_after=random.randint(3, 5) if ENABLE_ANTI_DETECTION else 3,
             browser=TIKTOK_BROWSER,
             headless=True,
-            # Playwright context options for longer timeout
-            context_options={"viewport": {"width": 1920, "height": 1080}},
-            override_browser_args=["--disable-blink-features=AutomationControlled"]
+            context_options={
+                "viewport": viewport,
+                "user_agent": get_random_user_agent() if ENABLE_ANTI_DETECTION else None,
+                "locale": "en-US",
+                "timezone_id": "America/New_York",
+            },
+            override_browser_args=stealth_args
         )
         tiktok_session_initialized = True
         tiktok_session_error = None
-        print("✅ TikTok API session created successfully")
+        print("✅ TikTok API session created successfully (with anti-detection)")
     except Exception as e:
         error_msg = str(e)
         tiktok_session_error = error_msg
@@ -621,7 +800,7 @@ def parse_instagram_story(story) -> InstagramStoryResponse:
 
 
 def ensure_instagram_session():
-    """Ensure Instagram session is initialized"""
+    """Ensure Instagram session is initialized with anti-detection measures"""
     global instagram_client, instagram_session_initialized, instagram_session_error
     
     if instagram_session_initialized:
@@ -642,6 +821,35 @@ def ensure_instagram_session():
         instagram_client = InstaClient()
         session_path = Path(INSTAGRAM_SESSION_FILE)
         
+        # Apply anti-detection device settings
+        if ENABLE_ANTI_DETECTION:
+            device = get_random_device()
+            instagram_client.set_device({
+                "app_version": device["app_version"],
+                "android_version": device["android_version"],
+                "android_release": device["android_release"],
+                "dpi": device["dpi"],
+                "resolution": device["resolution"],
+                "manufacturer": device["manufacturer"],
+                "device": device["device"],
+                "model": device["model"],
+                "cpu": device["cpu"],
+                "version_code": device["version_code"],
+            })
+            
+            # Set realistic user agent for Instagram
+            instagram_client.set_user_agent(
+                f"Instagram {device['app_version']} Android ({device['android_version']}/{device['android_release']}; "
+                f"{device['dpi']}; {device['resolution']}; {device['manufacturer']}; {device['device']}; "
+                f"{device['device']}; {device['cpu']}; en_US; {device['version_code']})"
+            )
+            
+            # Set request timeout and delays
+            instagram_client.delay_range = [int(MIN_REQUEST_DELAY), int(MAX_REQUEST_DELAY)]
+            
+            # Random delay before login
+            time.sleep(random.uniform(1, 2))
+        
         # Priority 1: Use session ID if provided (most reliable)
         if has_session_id:
             try:
@@ -649,7 +857,7 @@ def ensure_instagram_session():
                 instagram_client.dump_settings(session_path)
                 instagram_session_initialized = True
                 instagram_session_error = None
-                print("✅ Instagram login successful via session ID")
+                print("✅ Instagram login successful via session ID (with anti-detection)")
                 return
             except Exception as e:
                 print(f"⚠️ Session ID login failed: {e}, trying other methods...")
@@ -658,23 +866,57 @@ def ensure_instagram_session():
         if session_path.exists():
             try:
                 instagram_client.load_settings(session_path)
+                # Re-apply device settings after loading
+                if ENABLE_ANTI_DETECTION:
+                    device = get_random_device()
+                    instagram_client.set_device({
+                        "app_version": device["app_version"],
+                        "android_version": device["android_version"],
+                        "android_release": device["android_release"],
+                        "dpi": device["dpi"],
+                        "resolution": device["resolution"],
+                        "manufacturer": device["manufacturer"],
+                        "device": device["device"],
+                        "model": device["model"],
+                        "cpu": device["cpu"],
+                        "version_code": device["version_code"],
+                    })
+                
                 # Validate session by getting own user info
+                apply_request_delay_sync("instagram")
                 instagram_client.get_timeline_feed()
                 instagram_session_initialized = True
                 instagram_session_error = None
-                print("✅ Instagram session loaded from file")
+                print("✅ Instagram session loaded from file (with anti-detection)")
                 return
             except Exception:
                 print("⚠️ Saved session expired, trying fresh login...")
                 instagram_client = InstaClient()
+                # Re-apply device settings for new client
+                if ENABLE_ANTI_DETECTION:
+                    device = get_random_device()
+                    instagram_client.set_device({
+                        "app_version": device["app_version"],
+                        "android_version": device["android_version"],
+                        "android_release": device["android_release"],
+                        "dpi": device["dpi"],
+                        "resolution": device["resolution"],
+                        "manufacturer": device["manufacturer"],
+                        "device": device["device"],
+                        "model": device["model"],
+                        "cpu": device["cpu"],
+                        "version_code": device["version_code"],
+                    })
+                    instagram_client.delay_range = [int(MIN_REQUEST_DELAY), int(MAX_REQUEST_DELAY)]
         
         # Priority 3: Username/password login
         if has_user_pass:
+            apply_request_delay_sync("instagram")
             instagram_client.login(INSTAGRAM_USERNAME, INSTAGRAM_PASSWORD)
             instagram_client.dump_settings(session_path)
             instagram_session_initialized = True
             instagram_session_error = None
-            print("✅ Instagram login successful, session saved")
+            print("✅ Instagram login successful, session saved (with anti-detection)")
             return
         
         raise Exception("No valid login method available")
@@ -772,6 +1014,7 @@ async def init_instagram_session():
 async def get_tiktok_video_by_id(video_id: str):
     """Get TikTok video information by video ID"""
     await ensure_tiktok_session()
+    await apply_request_delay("tiktok")
     
     try:
         video_url = f"https://www.tiktok.com/@user/video/{video_id}"
@@ -788,6 +1031,7 @@ async def get_tiktok_video_by_id(video_id: str):
 async def get_tiktok_video_by_url(request: VideoUrlRequest):
     """Get TikTok video information from URL"""
     await ensure_tiktok_session()
+    await apply_request_delay("tiktok")
     
     try:
         video = tiktok_api.video(url=request.url)
@@ -808,6 +1052,7 @@ async def get_tiktok_video_comments(
 ):
     """Get comments from a TikTok video"""
     await ensure_tiktok_session()
+    await apply_request_delay("tiktok")
     
     try:
         video_url = f"https://www.tiktok.com/@user/video/{video_id}"
@@ -833,6 +1078,7 @@ async def get_tiktok_video_comments(
 async def get_tiktok_user_by_username(username: str):
     """Get TikTok user information by username"""
     await ensure_tiktok_session()
+    await apply_request_delay("tiktok")
     
     username = username.lstrip("@")
     
@@ -853,6 +1099,7 @@ async def get_tiktok_user_videos(
 ):
     """Get recent videos from a TikTok user"""
     await ensure_tiktok_session()
+    await apply_request_delay("tiktok")
     
     username = username.lstrip("@")
     
@@ -876,6 +1123,7 @@ async def get_tiktok_user_videos(
 async def get_instagram_user_by_username(username: str):
     """Get Instagram user information by username"""
     ensure_instagram_session()
+    apply_request_delay_sync("instagram")
     
     username = username.lstrip("@")
     
@@ -894,6 +1142,7 @@ async def get_instagram_user_posts(
 ):
     """Get recent posts from an Instagram user"""
     ensure_instagram_session()
+    apply_request_delay_sync("instagram")
     
     username = username.lstrip("@")
     
@@ -937,6 +1186,7 @@ async def get_instagram_user_posts(
 async def get_instagram_user_stories(username: str):
     """Get stories from an Instagram user"""
     ensure_instagram_session()
+    apply_request_delay_sync("instagram")
     
     username = username.lstrip("@")
     
@@ -958,6 +1208,7 @@ async def get_instagram_user_followers(
 ):
     """Get followers of an Instagram user"""
     ensure_instagram_session()
+    apply_request_delay_sync("instagram")
     
     username = username.lstrip("@")
     
@@ -979,6 +1230,7 @@ async def get_instagram_user_following(
 ):
     """Get users followed by an Instagram user"""
     ensure_instagram_session()
+    apply_request_delay_sync("instagram")
     
     username = username.lstrip("@")
     
@@ -997,6 +1249,7 @@ async def get_instagram_user_following(
 async def get_instagram_post_by_id(media_id: str):
     """Get Instagram post information by media ID or shortcode"""
     ensure_instagram_session()
+    apply_request_delay_sync("instagram")
     
     try:
         # Check if it's a shortcode (letters) or media PK (numbers)
@@ -1025,6 +1278,7 @@ async def get_instagram_post_by_id(media_id: str):
 async def get_instagram_post_by_url(request: VideoUrlRequest):
     """Get Instagram post information from URL"""
     ensure_instagram_session()
+    apply_request_delay_sync("instagram")
     
     try:
         pk = instagram_client.media_pk_from_url(request.url)
@@ -1048,10 +1302,16 @@ async def get_instagram_post_by_url(request: VideoUrlRequest):
 @app.get("/instagram/post/{media_id}/comments", response_model=InstagramCommentsResponse, tags=["Instagram - Post"], dependencies=[Depends(verify_api_key)])
 async def get_instagram_post_comments(
     media_id: str,
-    count: int = Query(default=50, ge=1, le=200, description="Number of comments to fetch")
+    count: int = Query(default=50, ge=1, le=200, description="Number of comments to fetch per page"),
+    cursor: Optional[str] = Query(default=None, description="Pagination cursor (min_id) from previous response")
 ):
-    """Get comments from an Instagram post"""
+    """Get comments from an Instagram post with pagination support.
+    
+    Instagram returns comments in pages. Use the 'next_cursor' from the response
+    to fetch subsequent pages of comments.
+    """
     ensure_instagram_session()
+    apply_request_delay_sync("instagram")
     
     try:
         # Check if it's a shortcode or media PK
@@ -1059,18 +1319,30 @@ async def get_instagram_post_comments(
             media_id = str(instagram_client.media_pk_from_code(media_id))
         
         comment_list = []
+        next_cursor = None
+        has_more = False
         
-        # Try standard method first
+        # Try media_comments_chunk for pagination support
         try:
-            comments = instagram_client.media_comments(media_id, amount=count)
+            comments, end_cursor = instagram_client.media_comments_chunk(
+                media_id, 
+                max_amount=count,
+                min_id=cursor  # Use cursor for pagination
+            )
             comment_list = [parse_instagram_comment(comment) for comment in comments]
+            next_cursor = end_cursor
+            has_more = bool(end_cursor)
         except Exception as e:
-            print(f"Standard media_comments failed: {e}, trying raw API...")
-            # Fallback to raw API request
+            print(f"media_comments_chunk failed: {e}, trying raw API...")
+            # Fallback to raw API request with pagination
             try:
+                params = {"count": count}
+                if cursor:
+                    params["min_id"] = cursor
+                
                 response = instagram_client.private_request(
                     f"media/{media_id}/comments/",
-                    params={"count": count}
+                    params=params
                 )
                 raw_comments = response.get('comments', [])
                 for raw_comment in raw_comments:
@@ -1078,13 +1350,19 @@ async def get_instagram_post_comments(
                         comment_list.append(parse_instagram_comment_dict(raw_comment))
                     except Exception as parse_error:
                         print(f"Failed to parse comment: {parse_error}")
+                
+                # Get pagination info from response
+                next_cursor = response.get('next_min_id') or response.get('next_max_id')
+                has_more = response.get('has_more_comments', False) or bool(next_cursor)
             except Exception as api_error:
                 print(f"Raw API also failed: {api_error}")
         
         return InstagramCommentsResponse(
             media_id=str(media_id),
             count=len(comment_list),
-            comments=comment_list
+            comments=comment_list,
+            next_cursor=next_cursor,
+            has_more=has_more
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching Instagram comments: {str(e)}")
@@ -1094,6 +1372,7 @@ async def get_instagram_post_comments(
 async def get_instagram_post_likers(media_id: str):
     """Get users who liked an Instagram post"""
     ensure_instagram_session()
+    apply_request_delay_sync("instagram")
     
     try:
         # Check if it's a shortcode or media PK
@@ -1116,6 +1395,7 @@ async def get_instagram_hashtag_posts(
 ):
     """Get top posts for a hashtag"""
     ensure_instagram_session()
+    apply_request_delay_sync("instagram")
     
     name = name.lstrip("#")
     
