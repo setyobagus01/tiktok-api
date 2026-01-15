@@ -1128,9 +1128,36 @@ async def get_instagram_user_by_username(username: str):
     username = username.lstrip("@")
     
     try:
-        user_id = instagram_client.user_id_from_username(username)
-        user = instagram_client.user_info(user_id)
-        return parse_instagram_user(user)
+        # Use V1 API directly to avoid slow GQL timeout
+        try:
+            user = instagram_client.user_info_by_username_v1(username)
+            return parse_instagram_user(user)
+        except Exception as v1_error:
+            print(f"V1 user lookup failed: {v1_error}, trying raw API...")
+            # Fallback to raw API request
+            response = instagram_client.private_request(
+                f"users/web_profile_info/",
+                params={"username": username}
+            )
+            user_data = response.get('data', {}).get('user', {})
+            if not user_data:
+                raise Exception("User not found")
+            
+            return InstagramUserResponse(
+                id=str(user_data.get('id', '')),
+                username=user_data.get('username', ''),
+                full_name=user_data.get('full_name', ''),
+                bio=user_data.get('biography', ''),
+                avatar=user_data.get('profile_pic_url'),
+                is_private=user_data.get('is_private', False),
+                is_verified=user_data.get('is_verified', False),
+                external_url=user_data.get('external_url'),
+                stats=InstagramUserStats(
+                    followers=user_data.get('edge_followed_by', {}).get('count', 0) or user_data.get('follower_count', 0),
+                    following=user_data.get('edge_follow', {}).get('count', 0) or user_data.get('following_count', 0),
+                    posts_count=user_data.get('edge_owner_to_timeline_media', {}).get('count', 0) or user_data.get('media_count', 0)
+                )
+            )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching Instagram user: {str(e)}")
 
@@ -1258,18 +1285,18 @@ async def get_instagram_post_by_id(media_id: str):
         else:
             pk = instagram_client.media_pk_from_code(media_id)
         
-        # Try standard method first
+        # Use raw API directly (faster, avoids slow internal methods)
         try:
-            media = instagram_client.media_info(pk)
-            return parse_instagram_media(media)
-        except Exception as e:
-            print(f"Standard media_info failed: {e}, trying raw API...")
-            # Fallback to raw API request
             response = instagram_client.private_request(f"media/{pk}/info/")
             items = response.get('items', [])
             if items:
                 return parse_instagram_media_dict(items[0])
-            raise Exception("No media found")
+            raise Exception("No media found in raw response")
+        except Exception as raw_error:
+            print(f"Raw API failed: {raw_error}, trying standard method...")
+            # Fallback to standard method
+            media = instagram_client.media_info(pk)
+            return parse_instagram_media(media)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching Instagram post: {str(e)}")
 
@@ -1283,18 +1310,18 @@ async def get_instagram_post_by_url(request: VideoUrlRequest):
     try:
         pk = instagram_client.media_pk_from_url(request.url)
         
-        # Try standard method first
+        # Use raw API directly (faster, avoids slow internal methods)
         try:
-            media = instagram_client.media_info(pk)
-            return parse_instagram_media(media)
-        except Exception as e:
-            print(f"Standard media_info failed: {e}, trying raw API...")
-            # Fallback to raw API request
             response = instagram_client.private_request(f"media/{pk}/info/")
             items = response.get('items', [])
             if items:
                 return parse_instagram_media_dict(items[0])
-            raise Exception("No media found")
+            raise Exception("No media found in raw response")
+        except Exception as raw_error:
+            print(f"Raw API failed: {raw_error}, trying standard method...")
+            # Fallback to standard method
+            media = instagram_client.media_info(pk)
+            return parse_instagram_media(media)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching Instagram post: {str(e)}")
 
