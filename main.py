@@ -845,7 +845,7 @@ def ensure_instagram_session():
             )
             
             # Set request timeout and delays
-            instagram_client.delay_range = [int(MIN_REQUEST_DELAY), int(MAX_REQUEST_DELAY)]
+            instagram_client.delay_range = [0, 0]  # Disable internal delays - we handle delays at endpoint level
             
             # Random delay before login
             time.sleep(random.uniform(1, 2))
@@ -882,9 +882,9 @@ def ensure_instagram_session():
                         "version_code": device["version_code"],
                     })
                 
-                # Validate session by getting own user info
+                # Validate session with a fast API call (instead of slow timeline fetch)
                 apply_request_delay_sync("instagram")
-                instagram_client.get_timeline_feed()
+                instagram_client.account_info()
                 instagram_session_initialized = True
                 instagram_session_error = None
                 print("✅ Instagram session loaded from file (with anti-detection)")
@@ -907,7 +907,7 @@ def ensure_instagram_session():
                         "cpu": device["cpu"],
                         "version_code": device["version_code"],
                     })
-                    instagram_client.delay_range = [int(MIN_REQUEST_DELAY), int(MAX_REQUEST_DELAY)]
+                    instagram_client.delay_range = [0, 0]  # Disable internal delays
         
         # Priority 3: Username/password login
         if has_user_pass:
