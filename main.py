@@ -41,6 +41,7 @@ INSTAGRAM_USERNAME = os.getenv("INSTAGRAM_USERNAME")
 INSTAGRAM_PASSWORD = os.getenv("INSTAGRAM_PASSWORD")
 INSTAGRAM_SESSION_ID = os.getenv("INSTAGRAM_SESSION_ID")  # Alternative: use session ID from browser cookies
 INSTAGRAM_SESSION_FILE = os.getenv("INSTAGRAM_SESSION_FILE", "instagram_session.json")
+INSTAGRAM_PROXY = os.getenv("INSTAGRAM_PROXY")  # Rotating proxy for Instagram (e.g., http://user:pass@host:port)
 
 # General
 PROXY_URL = os.getenv("PROXY_URL")
@@ -819,6 +820,11 @@ def ensure_instagram_session():
     
     try:
         instagram_client = InstaClient()
+        
+        # Apply proxy if configured (helps avoid account suspension)
+        if INSTAGRAM_PROXY:
+            instagram_client.set_proxy(INSTAGRAM_PROXY)
+            print(f"✅ Instagram proxy configured: {INSTAGRAM_PROXY.split('@')[-1] if '@' in INSTAGRAM_PROXY else 'proxy enabled'}")
         session_path = Path(INSTAGRAM_SESSION_FILE)
         
         # Apply anti-detection device settings
