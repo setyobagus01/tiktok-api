@@ -35,6 +35,7 @@ load_dotenv()
 # TikTok
 MS_TOKEN = os.getenv("MS_TOKEN")
 TIKTOK_BROWSER = os.getenv("TIKTOK_BROWSER", "chromium")
+TIKTOK_PROXY = os.getenv("TIKTOK_PROXY")  # Rotating proxy for TikTok (e.g., http://user:pass@host:port)
 
 # Instagram
 INSTAGRAM_USERNAME = os.getenv("INSTAGRAM_USERNAME")
@@ -390,43 +391,43 @@ VIEWPORT_SIZES = [
     {"width": 2560, "height": 1440},
 ]
 
-# Instagram device settings for mobile API
+# Instagram device settings for mobile API - Updated to latest app version
 INSTAGRAM_DEVICES = [
     {
-        "app_version": "269.0.0.18.75",
-        "android_version": 31,
-        "android_release": "12.0",
+        "app_version": "410.0.0.0.96",
+        "android_version": 33,
+        "android_release": "13",
         "dpi": "480dpi",
         "resolution": "1080x2400",
-        "manufacturer": "Samsung",
-        "device": "SM-G991B",
-        "model": "Galaxy S21",
-        "cpu": "exynos2100",
-        "version_code": "314665256",
+        "manufacturer": "xiaomi",
+        "device": "M2007J20CG",
+        "model": "surya",
+        "cpu": "qcom",
+        "version_code": "641123490",
     },
     {
-        "app_version": "269.0.0.18.75",
-        "android_version": 33,
-        "android_release": "13.0",
-        "dpi": "420dpi",
+        "app_version": "410.0.0.0.96",
+        "android_version": 34,
+        "android_release": "14",
+        "dpi": "440dpi",
         "resolution": "1080x2340",
         "manufacturer": "Google",
-        "device": "Pixel 7",
-        "model": "Pixel 7",
+        "device": "oriole",
+        "model": "Pixel 6",
         "cpu": "tensor",
-        "version_code": "314665256",
+        "version_code": "641123490",
     },
     {
-        "app_version": "269.0.0.18.75",
-        "android_version": 32,
-        "android_release": "12.1",
-        "dpi": "440dpi",
+        "app_version": "410.0.0.0.96",
+        "android_version": 33,
+        "android_release": "13",
+        "dpi": "560dpi",
         "resolution": "1440x3200",
-        "manufacturer": "Samsung",
-        "device": "SM-S908B",
-        "model": "Galaxy S22 Ultra",
-        "cpu": "exynos2200",
-        "version_code": "314665256",
+        "manufacturer": "samsung",
+        "device": "SM-S918B",
+        "model": "Galaxy S23 Ultra",
+        "cpu": "qcom",
+        "version_code": "641123490",
     },
 ]
 
@@ -543,20 +544,39 @@ async def ensure_tiktok_session():
         if ENABLE_ANTI_DETECTION:
             await asyncio.sleep(random.uniform(1, 3))
         
-        await tiktok_api.create_sessions(
-            ms_tokens=[MS_TOKEN],
-            num_sessions=1,
-            sleep_after=random.randint(3, 5) if ENABLE_ANTI_DETECTION else 3,
-            browser=TIKTOK_BROWSER,
-            headless=True,
-            context_options={
-                "viewport": viewport,
-                "user_agent": get_random_user_agent() if ENABLE_ANTI_DETECTION else None,
-                "locale": "en-US",
-                "timezone_id": "America/New_York",
-            },
-            override_browser_args=stealth_args
-        )
+        # Build context options
+        context_opts = {
+            "viewport": viewport,
+            "user_agent": get_random_user_agent() if ENABLE_ANTI_DETECTION else None,
+            "locale": "en-US",
+            "timezone_id": "America/New_York",
+        }
+        
+        # Build create_sessions kwargs
+        session_kwargs = {
+            "ms_tokens": [MS_TOKEN],
+            "num_sessions": 1,
+            "sleep_after": random.randint(3, 5) if ENABLE_ANTI_DETECTION else 3,
+            "browser": TIKTOK_BROWSER,
+            "headless": True,
+            "context_options": context_opts,
+            "override_browser_args": stealth_args,
+        }
+        
+        # Add proxy if configured (TikTokApi uses 'proxies' as a list of ProxySettings dicts)
+        if TIKTOK_PROXY:
+            # Parse proxy URL: http://user:pass@host:port
+            from urllib.parse import urlparse
+            parsed = urlparse(TIKTOK_PROXY)
+            proxy_settings = {"server": f"{parsed.scheme}://{parsed.hostname}:{parsed.port}"}
+            if parsed.username:
+                proxy_settings["username"] = parsed.username
+            if parsed.password:
+                proxy_settings["password"] = parsed.password
+            session_kwargs["proxies"] = [proxy_settings]
+            print(f"🔄 TikTok proxy configured: {parsed.hostname}:{parsed.port}")
+        
+        await tiktok_api.create_sessions(**session_kwargs)
         tiktok_session_initialized = True
         tiktok_session_error = None
         print("✅ TikTok API session created successfully (with anti-detection)")
@@ -1324,11 +1344,31 @@ async def get_instagram_post_by_url(request: VideoUrlRequest):
                 return parse_instagram_media_dict(items[0])
             raise Exception("No media found in raw response")
         except Exception as raw_error:
+            error_str = str(raw_error).lower()
+            if 'checkpoint' in error_str:
+                raise HTTPException(
+                    status_code=403, 
+                    detail="Instagram checkpoint required. Your account or proxy IP needs verification. "
+                           "Try: 1) Remove INSTAGRAM_PROXY to test without proxy, or "
+                           "2) Login to Instagram in a browser and complete verification, "
+                           "3) Get a new sessionid from cookies, 4) Update INSTAGRAM_SESSION_ID and redeploy."
+                )
             print(f"Raw API failed: {raw_error}, trying standard method...")
             # Fallback to standard method
             media = instagram_client.media_info(pk)
             return parse_instagram_media(media)
+    except HTTPException:
+        raise
     except Exception as e:
+        error_str = str(e).lower()
+        if 'checkpoint' in error_str:
+            raise HTTPException(
+                status_code=403, 
+                detail="Instagram checkpoint required. Your account or proxy IP needs verification. "
+                       "Try: 1) Remove INSTAGRAM_PROXY to test without proxy, or "
+                       "2) Login to Instagram in a browser and complete verification, "
+                       "3) Get a new sessionid from cookies, 4) Update INSTAGRAM_SESSION_ID and redeploy."
+            )
         raise HTTPException(status_code=500, detail=f"Error fetching Instagram post: {str(e)}")
 
 
